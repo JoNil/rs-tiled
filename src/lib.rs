@@ -340,6 +340,8 @@ pub struct Tileset {
     /// The GID of the first tile stored
     pub first_gid: u32,
     pub name: String,
+    /// The path of the tileset file if it is external
+    pub source: Option<String>,
     pub tile_width: u32,
     pub tile_height: u32,
     pub spacing: u32,
@@ -400,6 +402,7 @@ impl Tileset {
         });
 
         Ok(Tileset {
+            source: None,
             tile_width: width,
             tile_height: height,
             spacing: spacing.unwrap_or(0),
@@ -434,10 +437,11 @@ impl Tileset {
                 tileset_path
             ))
         })?;
-        Tileset::new_external(file, first_gid)
+
+        Tileset::new_external(file, first_gid, tileset_path.to_string_lossy().to_string())
     }
 
-    fn new_external<R: Read>(file: R, first_gid: u32) -> Result<Tileset, TiledError> {
+    fn new_external<R: Read>(file: R, first_gid: u32, tileset_path: String) -> Result<Tileset, TiledError> {
         let mut tileset_parser = EventReader::new(file);
         loop {
             match tileset_parser
@@ -452,6 +456,7 @@ impl Tileset {
                             first_gid,
                             &mut tileset_parser,
                             &attributes,
+                            tileset_path,
                         );
                     }
                 }
@@ -469,6 +474,7 @@ impl Tileset {
         first_gid: u32,
         parser: &mut EventReader<R>,
         attrs: &Vec<OwnedAttribute>,
+        tileset_path: String,
     ) -> Result<Tileset, TiledError> {
         let ((spacing, margin, tilecount), (name, width, height)) = get_attrs!(
             attrs,
@@ -506,6 +512,7 @@ impl Tileset {
         Ok(Tileset {
             first_gid: first_gid,
             name: name,
+            source: Some(tileset_path),
             tile_width: width,
             tile_height: height,
             spacing: spacing.unwrap_or(0),
@@ -1296,5 +1303,5 @@ pub fn parse<R: Read>(reader: R) -> Result<Map, TiledError> {
 /// map. You must pass in `first_gid`.  If you do not need to use gids for anything,
 /// passing in 1 will work fine.
 pub fn parse_tileset<R: Read>(reader: R, first_gid: u32) -> Result<Tileset, TiledError> {
-    Tileset::new_external(reader, first_gid)
+    Tileset::new_external(reader, first_gid, "".to_string())
 }
