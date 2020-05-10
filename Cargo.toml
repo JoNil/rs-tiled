@@ -21,7 +21,8 @@ name = "example"
 path = "examples/main.rs"
 
 [dependencies]
-base64  = "0.10"
+base64  = "0.12"
+libflate = "1"
 xml-rs  = "0.8"
-libflate = "0.1.18"
 zstd = "0.5"
+
