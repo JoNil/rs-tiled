@@ -4,8 +4,8 @@ use std::collections::HashMap;
 use std::fmt;
 use std::fs::File;
 use std::io::{BufReader, Error, Read};
-use std::path::Path;
-use std::str::FromStr;
+use std::path::{PathBuf, Path};
+use std::{rc::Rc, str::FromStr};
 use xml::attribute::OwnedAttribute;
 use xml::reader::XmlEvent;
 use xml::reader::{Error as XmlError, EventReader};
@@ -225,6 +225,7 @@ pub struct Map {
     pub properties: Properties,
     pub background_colour: Option<Colour>,
     pub infinite: bool,
+    pub templates: HashMap<PathBuf, Rc<ObjectTemplate>>,
 }
 
 impl Map {
@@ -233,6 +234,9 @@ impl Map {
         attrs: Vec<OwnedAttribute>,
         map_path: Option<&Path>,
     ) -> Result<Map, TiledError> {
+
+        let mut templates = HashMap::new();
+
         let ((c, infinite), (v, o, w, h, tw, th)) = get_attrs!(
             attrs,
             optionals: [
@@ -258,7 +262,7 @@ impl Map {
         let mut layer_index = 0;
         parse_tag!(parser, "map", {
             "tileset" => | attrs| {
-                tilesets.push(Tileset::new(parser, attrs, map_path)?);
+                tilesets.push(Tileset::new(parser, attrs, map_path, &mut templates)?);
                 Ok(())
             },
             "layer" => |attrs| {
@@ -276,7 +280,7 @@ impl Map {
                 Ok(())
             },
             "objectgroup" => |attrs| {
-                object_groups.push(ObjectGroup::new(parser, attrs, Some(layer_index), map_path)?);
+                object_groups.push(ObjectGroup::new(parser, attrs, Some(layer_index), map_path, &mut templates)?);
                 layer_index += 1;
                 Ok(())
             },
@@ -294,7 +298,8 @@ impl Map {
             object_groups,
             properties,
             background_colour: c,
-            infinite: infinite.unwrap_or(false)
+            infinite: infinite.unwrap_or(false),
+            templates,
         })
     }
 
@@ -359,14 +364,16 @@ impl Tileset {
         parser: &mut EventReader<R>,
         attrs: Vec<OwnedAttribute>,
         map_path: Option<&Path>,
+        template_cache: &mut HashMap<PathBuf, Rc<ObjectTemplate>>,
     ) -> Result<Tileset, TiledError> {
-        Tileset::new_internal(parser, &attrs, map_path).or_else(|_| Tileset::new_reference(&attrs, map_path))
+        Tileset::new_internal(parser, &attrs, map_path, template_cache).or_else(|_| Tileset::new_reference(&attrs, map_path, template_cache))
     }
 
     fn new_internal<R: Read>(
         parser: &mut EventReader<R>,
         attrs: &Vec<OwnedAttribute>,
         map_path: Option<&Path>,
+        template_cache: &mut HashMap<PathBuf, Rc<ObjectTemplate>>,
     ) -> Result<Tileset, TiledError> {
         let ((spacing, margin, tilecount), (first_gid, name, width, height)) = get_attrs!(
            attrs,
@@ -397,7 +404,7 @@ impl Tileset {
                 Ok(())
             },
             "tile" => |attrs| {
-                tiles.push(Tile::new(parser, attrs, map_path)?);
+                tiles.push(Tile::new(parser, attrs, map_path, template_cache)?);
                 Ok(())
             },
         });
@@ -420,6 +427,7 @@ impl Tileset {
     fn new_reference(
         attrs: &Vec<OwnedAttribute>,
         map_path: Option<&Path>,
+        template_cache: &mut HashMap<PathBuf, Rc<ObjectTemplate>>,
     ) -> Result<Tileset, TiledError> {
         let ((), (first_gid, source)) = get_attrs!(
             attrs,
@@ -439,10 +447,10 @@ impl Tileset {
             ))
         })?;
 
-        Tileset::new_external(file, first_gid, tileset_path.to_string_lossy().to_string())
+        Tileset::new_external(file, first_gid, tileset_path.to_string_lossy().to_string(), template_cache)
     }
 
-    fn new_external<R: Read>(file: R, first_gid: u32, tileset_path: String) -> Result<Tileset, TiledError> {
+    fn new_external<R: Read>(file: R, first_gid: u32, tileset_path: String, template_cache: &mut HashMap<PathBuf, Rc<ObjectTemplate>>) -> Result<Tileset, TiledError> {
         let mut tileset_parser = EventReader::new(file);
         loop {
             match tileset_parser
@@ -458,6 +466,7 @@ impl Tileset {
                             &mut tileset_parser,
                             &attributes,
                             tileset_path,
+                            template_cache,
                         );
                     }
                 }
@@ -476,6 +485,7 @@ impl Tileset {
         parser: &mut EventReader<R>,
         attrs: &Vec<OwnedAttribute>,
         tileset_path: String,
+        template_cache: &mut HashMap<PathBuf, Rc<ObjectTemplate>>,
     ) -> Result<Tileset, TiledError> {
         let ((spacing, margin, tilecount), (name, width, height)) = get_attrs!(
             attrs,
@@ -501,7 +511,7 @@ impl Tileset {
                 Ok(())
             },
             "tile" => |attrs| {
-                tiles.push(Tile::new(parser, attrs, Some(Path::new(&tileset_path)))?);
+                tiles.push(Tile::new(parser, attrs, Some(Path::new(&tileset_path)), template_cache)?);
                 Ok(())
             },
             "properties" => |_| {
@@ -542,6 +552,7 @@ impl Tile {
         parser: &mut EventReader<R>,
         attrs: Vec<OwnedAttribute>,
         map_path: Option<&Path>,
+        template_cache: &mut HashMap<PathBuf, Rc<ObjectTemplate>>,
     ) -> Result<Tile, TiledError> {
         let ((tile_type, probability), id) = get_attrs!(
             attrs,
@@ -569,7 +580,7 @@ impl Tile {
                 Ok(())
             },
             "objectgroup" => |attrs| {
-                objectgroup = Some(ObjectGroup::new(parser, attrs, None, map_path)?);
+                objectgroup = Some(ObjectGroup::new(parser, attrs, None, map_path, template_cache)?);
                 Ok(())
             },
             "animation" => |_| {
@@ -842,6 +853,7 @@ impl ObjectGroup {
         attrs: Vec<OwnedAttribute>,
         layer_index: Option<u32>,
         map_path: Option<&Path>,
+        template_cache: &mut HashMap<PathBuf, Rc<ObjectTemplate>>,
     ) -> Result<ObjectGroup, TiledError> {
         let ((o, v, c, n), ()) = get_attrs!(
             attrs,
@@ -858,7 +870,7 @@ impl ObjectGroup {
         let mut properties = HashMap::new();
         parse_tag!(parser, "objectgroup", {
             "object" => |attrs| {
-                objects.push(Object::new(parser, attrs, map_path)?);
+                objects.push(Object::new(parser, attrs, map_path, template_cache)?);
                 Ok(())
             },
             "properties" => |_| {
@@ -897,6 +909,7 @@ impl ObjectTemplate {
     fn new<R: Read>(
         parser: &mut EventReader<R>,
         map_path: Option<&Path>,
+        template_cache: &mut HashMap<PathBuf, Rc<ObjectTemplate>>,
     ) -> Result<ObjectTemplate, TiledError> {
 
         let mut tileset = None;
@@ -904,11 +917,11 @@ impl ObjectTemplate {
 
         parse_tag!(parser, "template", {
             "tileset" => |attrs| {
-                tileset = Some(Tileset::new(parser, attrs, map_path)?);
+                tileset = Some(Tileset::new(parser, attrs, map_path, template_cache)?);
                 Ok(())
             },
             "object" => |attrs| {
-                object = Some(Object::new(parser, attrs, map_path)?);
+                object = Some(Object::new(parser, attrs, map_path, template_cache)?);
                 Ok(())
             },
         });
@@ -920,7 +933,7 @@ impl ObjectTemplate {
     }
 }
 
-fn parse_template_impl<R: Read>(reader: R, map_path: Option<&Path>) -> Result<ObjectTemplate, TiledError> {
+fn parse_template_impl<R: Read>(reader: R, map_path: Option<&Path>, template_cache: &mut HashMap<PathBuf, Rc<ObjectTemplate>>) -> Result<ObjectTemplate, TiledError> {
     let mut parser = EventReader::new(reader);
     loop {
         match parser.next().map_err(TiledError::XmlDecodingError)? {
@@ -928,7 +941,7 @@ fn parse_template_impl<R: Read>(reader: R, map_path: Option<&Path>) -> Result<Ob
                 name, ..
             } => {
                 if name.local_name == "template" {
-                    return ObjectTemplate::new(&mut parser, map_path);
+                    return ObjectTemplate::new(&mut parser, map_path, template_cache);
                 }
             }
             XmlEvent::EndDocument => {
@@ -955,7 +968,7 @@ pub struct Object {
     pub visible: bool,
     pub shape: ObjectShape,
     pub properties: Properties,
-    pub template: Option<Box<ObjectTemplate>>,
+    pub template: Option<Rc<ObjectTemplate>>,
 }
 
 impl Object {
@@ -963,6 +976,7 @@ impl Object {
         parser: &mut EventReader<R>,
         attrs: Vec<OwnedAttribute>,
         map_path: Option<&Path>,
+        template_cache: &mut HashMap<PathBuf, Rc<ObjectTemplate>>,
     ) -> Result<Object, TiledError> {
         let ((id, template, gid, n, t, w, h, v, r, x, y), ()) = get_attrs!(
             attrs,
@@ -1036,10 +1050,19 @@ impl Object {
                 template.into()
             };
 
-            let template_file = File::open(&path)
+            if !template_cache.contains_key(&path) {
+
+                let template_file = File::open(&path)
                 .map_err(|e| TiledError::Other(format!("Unable to open {:?}: {}", &path, e)))?;
 
-            Some(Box::new(parse_template_impl(&template_file, Some(&path))?))
+                let template = Rc::new(parse_template_impl(&template_file, Some(&path), template_cache)?);
+
+                template_cache.insert(path, template.clone());
+
+                Some(template)
+            } else {
+                template_cache.get(&path).map(Clone::clone)
+            }
         } else {
             None
         };
@@ -1381,6 +1404,6 @@ pub fn parse<R: Read>(reader: R) -> Result<Map, TiledError> {
 /// External tilesets do not have a firstgid attribute.  That lives in the
 /// map. You must pass in `first_gid`.  If you do not need to use gids for anything,
 /// passing in 1 will work fine.
-pub fn parse_tileset<R: Read>(reader: R, first_gid: u32) -> Result<Tileset, TiledError> {
-    Tileset::new_external(reader, first_gid, "".to_string())
+pub fn parse_tileset<R: Read>(reader: R, first_gid: u32, template_cache: &mut HashMap<PathBuf, Rc<ObjectTemplate>>,) -> Result<Tileset, TiledError> {
+    Tileset::new_external(reader, first_gid, "".to_string(), template_cache)
 }
