@@ -276,7 +276,7 @@ impl Map {
                 Ok(())
             },
             "objectgroup" => |attrs| {
-                object_groups.push(ObjectGroup::new(parser, attrs, Some(layer_index))?);
+                object_groups.push(ObjectGroup::new(parser, attrs, Some(layer_index), map_path)?);
                 layer_index += 1;
                 Ok(())
             },
@@ -360,12 +360,13 @@ impl Tileset {
         attrs: Vec<OwnedAttribute>,
         map_path: Option<&Path>,
     ) -> Result<Tileset, TiledError> {
-        Tileset::new_internal(parser, &attrs).or_else(|_| Tileset::new_reference(&attrs, map_path))
+        Tileset::new_internal(parser, &attrs, map_path).or_else(|_| Tileset::new_reference(&attrs, map_path))
     }
 
     fn new_internal<R: Read>(
         parser: &mut EventReader<R>,
         attrs: &Vec<OwnedAttribute>,
+        map_path: Option<&Path>,
     ) -> Result<Tileset, TiledError> {
         let ((spacing, margin, tilecount), (first_gid, name, width, height)) = get_attrs!(
            attrs,
@@ -396,7 +397,7 @@ impl Tileset {
                 Ok(())
             },
             "tile" => |attrs| {
-                tiles.push(Tile::new(parser, attrs)?);
+                tiles.push(Tile::new(parser, attrs, map_path)?);
                 Ok(())
             },
         });
@@ -500,7 +501,7 @@ impl Tileset {
                 Ok(())
             },
             "tile" => |attrs| {
-                tiles.push(Tile::new(parser, attrs)?);
+                tiles.push(Tile::new(parser, attrs, Some(Path::new(&tileset_path)))?);
                 Ok(())
             },
             "properties" => |_| {
@@ -540,6 +541,7 @@ impl Tile {
     fn new<R: Read>(
         parser: &mut EventReader<R>,
         attrs: Vec<OwnedAttribute>,
+        map_path: Option<&Path>,
     ) -> Result<Tile, TiledError> {
         let ((tile_type, probability), id) = get_attrs!(
             attrs,
@@ -567,7 +569,7 @@ impl Tile {
                 Ok(())
             },
             "objectgroup" => |attrs| {
-                objectgroup = Some(ObjectGroup::new(parser, attrs, None)?);
+                objectgroup = Some(ObjectGroup::new(parser, attrs, None, map_path)?);
                 Ok(())
             },
             "animation" => |_| {
@@ -839,6 +841,7 @@ impl ObjectGroup {
         parser: &mut EventReader<R>,
         attrs: Vec<OwnedAttribute>,
         layer_index: Option<u32>,
+        map_path: Option<&Path>,
     ) -> Result<ObjectGroup, TiledError> {
         let ((o, v, c, n), ()) = get_attrs!(
             attrs,
@@ -855,7 +858,7 @@ impl ObjectGroup {
         let mut properties = HashMap::new();
         parse_tag!(parser, "objectgroup", {
             "object" => |attrs| {
-                objects.push(Object::new(parser, attrs)?);
+                objects.push(Object::new(parser, attrs, map_path)?);
                 Ok(())
             },
             "properties" => |_| {
@@ -885,6 +888,60 @@ pub enum ObjectShape {
 }
 
 #[derive(Debug, PartialEq, Clone)]
+pub struct ObjectTemplate {
+    pub object: Option<Object>,
+    pub tileset: Option<Tileset>,
+}
+
+impl ObjectTemplate {
+    fn new<R: Read>(
+        parser: &mut EventReader<R>,
+        map_path: Option<&Path>,
+    ) -> Result<ObjectTemplate, TiledError> {
+
+        let mut tileset = None;
+        let mut object = None;
+
+        parse_tag!(parser, "template", {
+            "tileset" => |attrs| {
+                tileset = Some(Tileset::new(parser, attrs, map_path)?);
+                Ok(())
+            },
+            "object" => |attrs| {
+                object = Some(Object::new(parser, attrs, map_path)?);
+                Ok(())
+            },
+        });
+
+        Ok(ObjectTemplate {
+            object,
+            tileset,
+        })
+    }
+}
+
+fn parse_template_impl<R: Read>(reader: R, map_path: Option<&Path>) -> Result<ObjectTemplate, TiledError> {
+    let mut parser = EventReader::new(reader);
+    loop {
+        match parser.next().map_err(TiledError::XmlDecodingError)? {
+            XmlEvent::StartElement {
+                name, ..
+            } => {
+                if name.local_name == "template" {
+                    return ObjectTemplate::new(&mut parser, map_path);
+                }
+            }
+            XmlEvent::EndDocument => {
+                return Err(TiledError::PrematureEnd(
+                    "Document ended before template was parsed".to_string(),
+                ))
+            }
+            _ => {}
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Clone)]
 pub struct Object {
     pub id: u32,
     pub gid: u32,
@@ -898,17 +955,20 @@ pub struct Object {
     pub visible: bool,
     pub shape: ObjectShape,
     pub properties: Properties,
+    pub template: Option<Box<ObjectTemplate>>,
 }
 
 impl Object {
     fn new<R: Read>(
         parser: &mut EventReader<R>,
         attrs: Vec<OwnedAttribute>,
+        map_path: Option<&Path>,
     ) -> Result<Object, TiledError> {
-        let ((id, gid, n, t, w, h, v, r), (x, y)) = get_attrs!(
+        let ((id, template, gid, n, t, w, h, v, r, x, y), ()) = get_attrs!(
             attrs,
             optionals: [
                 ("id", id, |v:String| v.parse().ok()),
+                ("template", template, |v:String| v.into()),
                 ("gid", gid, |v:String| v.parse().ok()),
                 ("name", name, |v:String| v.parse().ok()),
                 ("type", obj_type, |v:String| v.parse().ok()),
@@ -916,13 +976,16 @@ impl Object {
                 ("height", height, |v:String| v.parse().ok()),
                 ("visible", visible, |v:String| v.parse().ok()),
                 ("rotation", rotation, |v:String| v.parse().ok()),
-            ],
-            required: [
                 ("x", x, |v:String| v.parse().ok()),
                 ("y", y, |v:String| v.parse().ok()),
             ],
+            required: [
+            ],
             TiledError::MalformedAttributes("objects must have an x and a y number".to_string())
         );
+
+        let x = x.unwrap_or(0.0);
+        let y = y.unwrap_or(0.0);
         let v = v.unwrap_or(true);
         let w = w.unwrap_or(0f32);
         let h = h.unwrap_or(0f32);
@@ -965,6 +1028,22 @@ impl Object {
             height: h,
         });
 
+        let template = if let Some(template) = &template {
+
+            let path = if let Some(map_path) = map_path {
+                map_path.parent().expect("map_path should be a path to the map file").join(template)
+            } else {
+                template.into()
+            };
+
+            let template_file = File::open(&path)
+                .map_err(|e| TiledError::Other(format!("Unable to open {:?}: {}", &path, e)))?;
+
+            Some(Box::new(parse_template_impl(&template_file, Some(&path))?))
+        } else {
+            None
+        };
+
         Ok(Object {
             id: id,
             gid: gid,
@@ -978,6 +1057,7 @@ impl Object {
             visible: v,
             shape: shape,
             properties: properties,
+            template: template,
         })
     }
 
