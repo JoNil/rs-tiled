@@ -693,7 +693,7 @@ impl Layer {
         parse_tag!(parser, "layer", {
             "data" => |attrs| {
                 if infinite {
-                    tiles = parse_infinite_data(parser, attrs, width)?;
+                    tiles = parse_infinite_data(parser, attrs)?;
                 } else {
                     tiles = parse_data(parser, attrs, width)?;
                 }
@@ -1071,7 +1071,6 @@ fn parse_animation<R: Read>(parser: &mut EventReader<R>) -> Result<Vec<Frame>, T
 fn parse_infinite_data<R: Read>(
     parser: &mut EventReader<R>,
     attrs: Vec<OwnedAttribute>,
-    width: u32,
 ) -> Result<LayerData, TiledError> {
     let ((e, c), ()) = get_attrs!(
         attrs,
